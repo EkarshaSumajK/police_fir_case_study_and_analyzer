@@ -117,42 +117,77 @@ def retrieve_law_sections(query_text, k=5):
     results = law_collection.query(query_embeddings=[embedding], n_results=k, include=["metadatas"])
     return results['metadatas'][0] if results and results.get('metadatas') else []
 
+# --- FIR Analysis Prompt ---
 def build_fir_system_prompt(fir_summary, relevant_laws, jurisdiction):
     """Constructs the system prompt for analyzing an FIR."""
     laws_context = "\n".join([f"- Section {law['section_number']} ({law['section_name']}): {law['full_text']}" for law in relevant_laws]) if relevant_laws else "No relevant laws found."
-    json_schema = {"sections": [{"section": "IPC/CrPC Section Number (e.g., IPC 420 or CrPC 41)","rationale_en": "2-3 sentence rationale in English.","rationale_te": "2-3 sentence rationale in Telugu.","reasoning_quote_en": "Verbatim quote from the provided law text.","reasoning_quote_te": "చట్ట పాఠ్యంలోని సంబంధిత వాక్యాన్ని తెలుగు లో యథాతధంగా ఇవ్వండి.","fir_quote_en": "Verbatim excerpt from the FIR summary.","fir_quote_te": "కేసు వివరాల్లోని సంబంధిత వాక్యాన్ని తెలుగు లో యథాతధంగా ఇవ్వండి.","law_citation": {"title_en": "Official name of the section in English","title_te": "తెలుగు శీర్షిక.","full_text_en": "Complete official text in English.","full_text_te": "తెలుగు పూర్తి పాఠ్యం.","url": "Official India Code URL (if available)."}}],"actions_en": ["Step 1 in English","Step 2 in English"],"actions_te": ["Step 1 in Telugu","Step 2 in Telugu"]}
-    prompt = f"""You are an expert AI legal assistant for Indian Police. Analyze the case details and recommend IPC/CrPC sections based ONLY on the provided context. Provide rationale, verbatim quotes, and procedural steps. Your output MUST be a single, valid JSON object conforming EXACTLY to the schema.
-    Potentially Relevant Law Sections:
-    {laws_context}
-    Jurisdiction: {jurisdiction}
-    Case Details to Analyze:
-    ```
-    {fir_summary}
-    ```
-    Your final output must be a valid JSON object matching this schema:
-    ```json
-    {json.dumps(json_schema, indent=2)}
-    ```
-    """
+    
+    json_schema = {
+        "sections": [{
+            "section": "BNS/CrPC Section Number (e.g., BNS 420 or CrPC 41)",
+            "rationale_en": "2-3 sentence rationale in English.",
+            "rationale_te": "2-3 sentence rationale in Telugu.",
+            "reasoning_quote_en": "Verbatim quote from the provided law text.",
+            "reasoning_quote_te": "చట్ట పాఠ్యంలోని సంబంధిత వాక్యాన్ని తెలుగు లో యథాతధంగా ఇవ్వండి.",
+            "fir_quote_en": "Verbatim excerpt from the FIR summary.",
+            "fir_quote_te": "కేసు వివరాల్లోని సంబంధిత వాక్యాన్ని తెలుగు లో యథాతధంగా ఇవ్వండి.",
+            "law_citation": {
+                "title_en": "Official name of the section in English",
+                "title_te": "తెలుగు శీర్షిక.",
+                "full_text_en": "Complete official text in English.",
+                "full_text_te": "తెలుగు పూర్తి పాఠ్యం.",
+                "url": "Official India Code URL (if available)."
+            }
+        }],
+        "actions_en": ["Step 1 in English", "Step 2 in English"],
+        "actions_te": ["Step 1 in Telugu", "Step 2 in Telugu"]
+    }
+
+    prompt = f"""You are an expert AI legal assistant for Indian Police. Analyze the case details and recommend BNS/CrPC sections based ONLY on the provided context. Provide rationale, verbatim quotes, and procedural steps. Your output MUST be a single, valid JSON object conforming EXACTLY to the schema.
+
+Potentially Relevant Law Sections:
+{laws_context}
+
+Jurisdiction: {jurisdiction}
+
+Case Details to Analyze:
+```
+{fir_summary}
+```
+
+IMPORTANT: Your final output must be a valid JSON object matching this schema:
+```json
+{json.dumps(json_schema, indent=2)}
+```
+"""
     return prompt
 
+# --- FIR Render Function ---
 def _render_fir_analysis(res: dict):
     """Renders the structured JSON output for FIR analysis."""
     if not res: st.info("No analysis available."); return
-    st.subheader("✅ Recommended Sections")
+    st.subheader("✅ Recommended BNS/CrPC Sections")  # Updated
     if res.get("sections"):
         for sec in res["sections"]:
             law = sec.get("law_citation", {}) or {}
-            st.markdown(f"<div class='card'><strong>Section:</strong> <code>{sec.get('section', 'N/A')}</code>", unsafe_allow_html=True)
+            section_label = sec.get("section", "N/A").replace("IPC", "BNS")  # Updated
+            st.markdown(f"<div class='card'><strong>Section:</strong> <code>{section_label}</code>", unsafe_allow_html=True)
+            
             col_en, col_te = st.columns(2)
             with col_en:
-                st.markdown(f"**English**\n- Title: {law.get('title_en', 'N/A')}")
+                st.markdown("**English**")
+                st.markdown(f"- Title: {law.get('title_en', 'N/A')}")
                 st.info(f"Rationale: {sec.get('rationale_en', 'N/A')}")
-                if quote_en := (sec.get("reasoning_quote_en") or "").strip(): st.markdown("Exact law quote (EN)"); st.markdown(f"<div class='quote-block'>{quote_en}</div>", unsafe_allow_html=True)
+                if quote_en := (sec.get("reasoning_quote_en") or "").strip():
+                    st.markdown("Exact law quote (EN)")
+                    st.markdown(f"<div class='quote-block'>{quote_en}</div>", unsafe_allow_html=True)
             with col_te:
-                st.markdown(f"**తెలుగు**\n- శీర్షిక: {_fallback_te(law.get('title_te'), law.get('title_en'))}")
+                st.markdown("**తెలుగు**")
+                st.markdown(f"- శీర్షిక: {_fallback_te(law.get('title_te'), law.get('title_en'))}")
                 st.info(f"తర్కం: {_fallback_te(sec.get('rationale_te'), sec.get('rationale_en'))}")
-                if quote_te := _fallback_te(sec.get("reasoning_quote_te"), sec.get("reasoning_quote_en")): st.markdown("యథాతధ చట్ట కోట్ (TE)"); st.markdown(f"<div class='quote-block'>{quote_te}</div>", unsafe_allow_html=True)
+                if quote_te := _fallback_te(sec.get("reasoning_quote_te"), sec.get("reasoning_quote_en")):
+                    st.markdown("యథాతధ చట్ట కోట్ (TE)")
+                    st.markdown(f"<div class='quote-block'>{quote_te}</div>", unsafe_allow_html=True)
 
             st.markdown("<details><summary>View full law text and source</summary>", unsafe_allow_html=True)
             if full_en := law.get("full_text_en") or law.get("full_text") or "": st.markdown("**Full text (English)**"); st.code(full_en, language="text")
@@ -288,14 +323,14 @@ def _render_judgment_analysis(res: dict):
     with col_v_en:
         st.markdown("**Key Legal Issues (English)**")
         for issue in res.get("key_legal_issues_en", []):
-            st.markdown(f"- {issue}")
+            st.markdown(f"- {issue.replace('IPC', 'BNS')}")  # Updated
         st.markdown("**Final Verdict**")
         st.success(res.get("final_verdict_en", "N/A"))
     with col_v_te:
         st.markdown("**కీలక చట్టపరమైన సమస్యలు (తెలుగు)**")
         issues_te = res.get("key_legal_issues_te", []) or [translate_to_te(i) for i in res.get("key_legal_issues_en", [])]
         for issue in issues_te:
-            st.markdown(f"- {issue}")
+            st.markdown(f"- {issue.replace('IPC', 'BNS')}")  # Updated
         st.markdown("**తుది తీర్పు**")
         st.success(_fallback_te(res.get("final_verdict_te"), res.get("final_verdict_en")))
 
@@ -303,8 +338,10 @@ def _render_judgment_analysis(res: dict):
         st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
         st.subheader("Cited Legal Principles & Precedents")
         for p in principles:
-            st.markdown(f"- **Principle:** {p.get('principle', 'N/A')}")
-            st.caption(f"Citation: {p.get('citation', 'N/A')}")
+            principle = p.get('principle', 'N/A').replace('IPC', 'BNS')  # Updated
+            citation = p.get('citation', 'N/A').replace('IPC', 'BNS')  # Updated
+            st.markdown(f"- **Principle:** {principle}")
+            st.caption(f"Citation: {citation}")
             
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -323,7 +360,7 @@ tab1, tab2 = st.tabs(["⚖️ FIR Analysis", "📜 Judgment Analysis"])
 
 # --- TAB 1: FIR ANALYSIS ---
 with tab1:
-    st.info("Paste FIRs, case details, or victim statements to analyze against IPC/CrPC sections.")
+    st.info("Paste FIRs to analyze against BNS/CrPC sections.")  # Updated
     
     for i, msg in enumerate(st.session_state.fir_messages):
         with st.chat_message(msg["role"]):
@@ -337,7 +374,7 @@ with tab1:
                     st.markdown(content)
             elif msg["role"] == "assistant":
                 num_sections = len(msg.get("analysis_result", {}).get("sections", []))
-                label = f"💡 AI Analysis: {num_sections} Section(s) Recommended" if num_sections > 0 else "💡 AI Analysis"
+                label = f"💡 AI Analysis: {num_sections} BNS/CrPC Section(s) Recommended" if num_sections > 0 else "💡 AI Analysis"  # Updated from IPC to BNS
                 is_last_message = (i == len(st.session_state.fir_messages) - 1)
                 with st.expander(label, expanded=is_last_message):
                     _render_fir_analysis(msg.get("analysis_result", {}))

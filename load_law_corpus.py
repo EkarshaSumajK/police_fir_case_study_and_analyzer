@@ -17,8 +17,8 @@ genai.configure(api_key=GOOGLE_API_KEY)
 CHROMA_PATH = "fir_vector_db"
 LAW_COLLECTION_NAME = "laws_collection"
 EMBEDDING_MODEL = "models/text-embedding-004"
-IPC_CSV_FILE_PATH = "ipc.csv"
-CRPC_CSV_FILE_PATH = "crpc.csv"
+IPC_CSV_FILE_PATH = "bns_sections.csv"  # Updated to use bns_sections.csv
+CRPC_CSV_FILE_PATH = "crpc.csv"  # This can be removed if not needed
 
 # --- HELPER FUNCTION FOR EMBEDDING ---
 def embed_text_gai(text, model):
@@ -46,11 +46,10 @@ def main():
 
     law_collection = client.create_collection(name=LAW_COLLECTION_NAME)
 
-    # Load IPC
+    # Load BNS (replacing IPC)
     try:
-        # Files are TSV-like with quoted, multi-line descriptions; be permissive
-        df_ipc = pd.read_csv(
-            IPC_CSV_FILE_PATH,
+        df_bns = pd.read_csv(
+            IPC_CSV_FILE_PATH,  # Now points to bns_sections.csv
             sep='\t',
             engine='python',
             quotechar='"',
@@ -64,7 +63,7 @@ def main():
         print(f"Error: The file '{IPC_CSV_FILE_PATH}' was not found.")
         return
 
-    # Load CrPC
+    # Load CrPC (optional, remove if not needed)
     try:
         df_crpc = pd.read_csv(
             CRPC_CSV_FILE_PATH,
@@ -85,11 +84,11 @@ def main():
     metadatas: list[dict] = []
     ids: list[str] = []
 
-    # Build IPC documents
-    print(f"Found {len(df_ipc)} IPC sections to process from '{IPC_CSV_FILE_PATH}'.")
-    for idx, row in df_ipc.iterrows():
+    # Build BNS documents
+    print(f"Found {len(df_bns)} BNS sections to process from '{IPC_CSV_FILE_PATH}'.")
+    for idx, row in df_bns.iterrows():
         section_raw = str(row.get('Section', '')).strip()
-        section_number = section_raw.replace('_', ' ').replace('IPC', 'IPC').strip() or 'IPC'
+        section_number = section_raw.replace('_', ' ').replace('BNS', 'BNS').strip() or 'BNS'
         section_title = str(row.get('Offense', '')).strip()
         description = str(row.get('Description', '')).strip()
         punishment = str(row.get('Punishment', '')).strip()
@@ -98,20 +97,19 @@ def main():
         doc_content = f"Section {section_number}: {section_title}. Text: {full_text}"
         documents.append(doc_content)
         metadatas.append({
-            'code': 'IPC',
+            'code': 'BNS',
             'section_number': section_number,
             'section_name': section_title,
             'full_text': full_text,
             'url': ''
         })
-        ids.append(f"ipc_{idx}")
+        ids.append(f"bns_{idx}")
 
-    # Build CrPC documents
+    # Build CrPC documents (optional, remove if not needed)
     print(f"Found {len(df_crpc)} CrPC sections to process from '{CRPC_CSV_FILE_PATH}'.")
     for idx, row in df_crpc.iterrows():
         sec_num = str(row.get('Section', '')).strip()
         section_number = f"CrPC {sec_num}" if sec_num else "CrPC"
-        # Column name in file appears as 'Section _name' with a space
         section_title = str(row.get('Section _name', '')).strip()
         description = str(row.get('Description', '')).strip()
         full_text = description
