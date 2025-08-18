@@ -121,12 +121,36 @@ def _embed_query_text(text: str):
         return result["embedding"]
     except Exception as e: st.error(f"Failed to embed query text: {e}"); return None
 
+# --- ChromaDB Initialization ---
+@st.cache_resource(show_spinner=False)
+def get_law_collection():
+    """Initialize and return the ChromaDB collection"""
+    try:
+        client = chromadb.PersistentClient(path=CHROMA_PATH)
+        return client.get_collection(LAW_COLLECTION_NAME)
+    except Exception as e:
+        st.error(f"🚨 Failed to connect to Vector Database: {e}")
+        st.stop()
+
+# Initialize collection at startup
+law_collection = get_law_collection()
+
 @st.cache_data(show_spinner=False)
 def retrieve_law_sections(query_text, k=5):
-    """Retrieve relevant law sections for FIR analysis."""
+    """Retrieve relevant law sections from ChromaDB"""
+    if not law_collection:  # Check if collection exists
+        st.error("Law collection not available")
+        return []
+    
     embedding = _embed_query_text(query_text)
-    if embedding is None: return []
-    results = law_collection.query(query_embeddings=[embedding], n_results=k, include=["metadatas"])
+    if embedding is None:
+        return []
+        
+    results = law_collection.query(
+        query_embeddings=[embedding],
+        n_results=k,
+        include=["metadatas"],
+    )
     return results['metadatas'][0] if results and results.get('metadatas') else []
 
 # --- FIR Analysis Prompt ---
@@ -253,23 +277,24 @@ def build_judgment_prompt(judgment_text: str):
     json_schema = {
         "summary_en": "A comprehensive and in-depth summary of the entire judgment, covering the case background, key arguments, the court's reasoning, and the final verdict. Should be several paragraphs long.",
         "summary_te": "A comprehensive and in-depth summary in Telugu, translated faithfully from the English version.",
-        "facts_of_the_case_en": "Key facts of the case presented in English.",
-        "facts_of_the_case_te": "Key facts of the case in Telugu.",
-        "parties_arguments": {
-            "petitioner_en": "Summary of petitioner/appellant arguments.",
-            "petitioner_te": "Summary in Telugu.",
-            "respondent_en": "Summary of respondent arguments.",
-            "respondent_te": "Summary in Telugu."
-        },
-        "key_legal_issues_en": ["List of legal questions addressed by the court in English."],
-        "key_legal_issues_te": ["List of legal questions in Telugu."],
-        "final_verdict_en": "The final decision or ruling of the court in English.",
-        "final_verdict_te": "The final decision in Telugu.",
-        "legal_principles_cited": [{
-            "principle": "Name or description of the legal principle or precedent.",
-            "citation": "Case law or statute cited."
-        }]
+        
     }
+    # "facts_of_the_case_en": "Key facts of the case presented in English.",
+        # "facts_of_the_case_te": "Key facts of the case in Telugu.",
+        # "parties_arguments": {
+        #     "petitioner_en": "Summary of petitioner/appellant arguments.",
+        #     "petitioner_te": "Summary in Telugu.",
+        #     "respondent_en": "Summary of respondent arguments.",
+        #     "respondent_te": "Summary in Telugu."
+        # },
+        # "key_legal_issues_en": ["List of legal questions addressed by the court in English."],
+        # "key_legal_issues_te": ["List of legal questions in Telugu."],
+        # "final_verdict_en": "The final decision or ruling of the court in English.",
+        # "final_verdict_te": "The final decision in Telugu.",
+        # "legal_principles_cited": [{
+        #     "principle": "Name or description of the legal principle or precedent.",
+        #     "citation": "Case law or statute cited."
+        # }]
     prompt = f"""You are an expert AI legal analyst. Your task is to read the following court judgment and provide a detailed, structured analysis.
 
     Analysis Requirements:
@@ -294,12 +319,14 @@ def build_judgment_prompt(judgment_text: str):
     return prompt
 
 def _render_judgment_analysis(res: dict):
-    """Renders the structured JSON output for judgment analysis."""
+    """Renders the structured JSON output for judgment analysis (strictly follows schema)."""
     if not res:
         st.info("No analysis available.")
         return
 
     st.markdown("<div class='card'>", unsafe_allow_html=True)
+    
+    # Only show summary_en and summary_te (schema-compliant)
     st.subheader("📜 Judgment Summary")
     col_s_en, col_s_te = st.columns(2)
     with col_s_en:
@@ -308,53 +335,7 @@ def _render_judgment_analysis(res: dict):
     with col_s_te:
         st.markdown("**సారాంశం (తెలుగు)**")
         st.write(_fallback_te(res.get("summary_te"), res.get("summary_en")))
-    st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
-
-    st.subheader("📖 Case Details")
-    col_d_en, col_d_te = st.columns(2)
-    with col_d_en:
-        st.markdown("**Facts of the Case (English)**")
-        st.info(res.get("facts_of_the_case_en", "N/A"))
-        if args := res.get("parties_arguments"):
-            st.markdown("**Petitioner/Appellant Arguments**")
-            st.warning(args.get("petitioner_en", "N/A"))
-            st.markdown("**Respondent Arguments**")
-            st.warning(args.get("respondent_en", "N/A"))
-    with col_d_te:
-        st.markdown("**కేసు వాస్తవాలు (తెలుగు)**")
-        st.info(_fallback_te(res.get("facts_of_the_case_te"), res.get("facts_of_the_case_en")))
-        if args := res.get("parties_arguments"):
-            st.markdown("**పిటిషనర్/అప్పీలుదారు వాదనలు**")
-            st.warning(_fallback_te(args.get("petitioner_te"), args.get("petitioner_en")))
-            st.markdown("**ప్రతివాది వాదనలు**")
-            st.warning(_fallback_te(args.get("respondent_te"), args.get("respondent_en")))
-
-    st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
-    st.subheader("⚖️ Legal Analysis & Verdict")
-    col_v_en, col_v_te = st.columns(2)
-    with col_v_en:
-        st.markdown("**Key Legal Issues (English)**")
-        for issue in res.get("key_legal_issues_en", []):
-            st.markdown(f"- {issue.replace('IPC', 'BNS')}")  # Updated
-        st.markdown("**Final Verdict**")
-        st.success(res.get("final_verdict_en", "N/A"))
-    with col_v_te:
-        st.markdown("**కీలక చట్టపరమైన సమస్యలు (తెలుగు)**")
-        issues_te = res.get("key_legal_issues_te", []) or [translate_to_te(i) for i in res.get("key_legal_issues_en", [])]
-        for issue in issues_te:
-            st.markdown(f"- {issue.replace('IPC', 'BNS')}")  # Updated
-        st.markdown("**తుది తీర్పు**")
-        st.success(_fallback_te(res.get("final_verdict_te"), res.get("final_verdict_en")))
-
-    if principles := res.get("legal_principles_cited"):
-        st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
-        st.subheader("Cited Legal Principles & Precedents")
-        for p in principles:
-            principle = p.get('principle', 'N/A').replace('IPC', 'BNS')  # Updated
-            citation = p.get('citation', 'N/A').replace('IPC', 'BNS')  # Updated
-            st.markdown(f"- **Principle:** {principle}")
-            st.caption(f"Citation: {citation}")
-            
+    
     st.markdown("</div>", unsafe_allow_html=True)
 
 def process_judgment_text(judgment_text: str):
@@ -525,48 +506,77 @@ if "messages" not in st.session_state:
 # Create 3 tabs
 tab1, tab2, tab3 = st.tabs(["⚖️ FIR Analysis", "📜 Judgment Analysis", "📄 Police Case Analysis Assistant"])
 
-# Tab 1: FIR Analysis (existing)
-with tab1:
-    st.info("Paste FIRs to analyze against BNS/CrPC sections.")  # Updated
-    
-    for i, msg in enumerate(st.session_state.fir_messages):
+# Common UI pattern for all tabs
+def chat_interface(messages, process_callback, placeholder_text, key_prefix=""):
+    """Reusable chat interface component"""
+    # Display message history
+    for msg in messages:
         with st.chat_message(msg["role"]):
-            if msg["role"] == "user":
-                content = msg["content"]
-                if len(content) > USER_INPUT_CHAR_LIMIT:
-                    summary = content[:USER_INPUT_CHAR_LIMIT].strip() + "..."
-                    with st.expander(f"You asked: *'{summary}'*"):
-                        st.markdown(content)
-                else:
-                    st.markdown(content)
-            elif msg["role"] == "assistant":
-                num_sections = len(msg.get("analysis_result", {}).get("sections", []))
-                label = f"💡 AI Analysis: {num_sections} BNS/CrPC Section(s) Recommended" if num_sections > 0 else "💡 AI Analysis"  # Updated from IPC to BNS
-                is_last_message = (i == len(st.session_state.fir_messages) - 1)
-                with st.expander(label, expanded=is_last_message):
-                    _render_fir_analysis(msg.get("analysis_result", {}))
+            st.markdown(msg["content"])
+            if msg.get("analysis_result"):
+                if "fir" in key_prefix:
+                    _render_fir_analysis(msg["analysis_result"])
+                elif "judgment" in key_prefix:
+                    _render_judgment_analysis(msg["analysis_result"])
+    
+    # Persistent input with immediate display
+    if prompt := st.chat_input(placeholder_text, key=f"{key_prefix}input"):
+        # Add user message immediately
+        messages.append({"role": "user", "content": prompt})
+        
+        # Process with callback
+        with st.spinner("Analyzing..."):
+            result = process_callback(prompt)
+            messages.append({
+                "role": "assistant",
+                "content": "Analysis complete",
+                "analysis_result": result
+            })
+        
+        # Rerun to update while preserving input
+        st.rerun()
 
-    if fir_input := st.chat_input("Enter case details to analyze…", key="fir_input"):
+# Tab 1: FIR Analysis
+with tab1:
+    st.info("Paste FIRs to analyze against BNS/CrPC sections.")
+    
+    # Default number of recommended sections
+    DEFAULT_SECTIONS = 5
+    
+    def process_fir_input(text):
+        relevant_laws = retrieve_law_sections(text, k=DEFAULT_SECTIONS)
+        system_prompt = build_fir_system_prompt(text, relevant_laws, st.session_state.jurisdiction)
+        return call_gemini_for_fir(system_prompt)
+    
+    # Display chat history
+    for msg in st.session_state.fir_messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if msg["role"] == "assistant" and "analysis_result" in msg:
+                _render_fir_analysis(msg["analysis_result"])
+    
+    # Chat input
+    if fir_input := st.chat_input("Enter FIR or case details...", key="fir_input"):
+        # Immediately display the user input in the chat interface
+        with st.chat_message("user"):
+            st.markdown(fir_input)
+        
+        # Append user input to session state
         st.session_state.fir_messages.append({"role": "user", "content": fir_input})
-        with st.spinner("🧠 Analyzing FIR... This may take a moment."):
-            relevant_laws = retrieve_law_sections(fir_input, k=st.session_state.top_k_laws)
-            if not relevant_laws:
-                st.warning("No relevant laws found for the given input. Try rephrasing or expanding the case details.")
-                st.session_state.fir_messages.append({"role": "assistant", "analysis_result": {}})
-                st.rerun()
+        
+        # Show spinner and process analysis
+        with st.spinner(f"Analyzing for relevant BNS/CrPC sections..."):
+            analysis_result = process_fir_input(fir_input)
+            st.session_state.fir_messages.append({
+                "role": "assistant",
+                "content": "FIR analysis complete",
+                "analysis_result": analysis_result
+            })
+        
+        # Trigger rerun to update the interface with the assistant's response
+        st.rerun()
 
-            system_prompt = build_fir_system_prompt(fir_input, relevant_laws, st.session_state.jurisdiction)
-            analysis_result = call_gemini_for_fir(system_prompt)
-            
-            if not analysis_result:
-                st.error("Failed to generate analysis. Please try again or check the input.")
-                st.session_state.fir_messages.append({"role": "assistant", "analysis_result": {}})
-            else:
-                st.session_state.fir_messages.append({"role": "assistant", "analysis_result": analysis_result})
-            
-            st.rerun()
-
-# Tab 2: Judgment Analysis (existing)
+# Tab 2: Judgment Analysis
 with tab2:
     st.info("Upload or paste the full text of a court judgment for a detailed summary and analysis.")
     
@@ -605,28 +615,29 @@ with tab2:
                 else:
                     st.markdown(content)
             elif msg["role"] == "assistant":
-                label = "📜 AI Judgment Summary & Analysis"
+                mode = msg.get("analysis_mode", "detailed")
+                mode_label = "📜 AI Judgment Summary" if mode == "simplified" else "📜 AI Judgment Summary & Analysis"
                 is_last_message = (i == len(st.session_state.judgment_messages) - 1)
-                with st.expander(label, expanded=is_last_message):
+                with st.expander(f"{mode_label} ({mode.title()} Mode)", expanded=is_last_message):
                     _render_judgment_analysis(msg.get("analysis_result", {}))
 
     if judgment_input := st.chat_input("Or paste court judgment text here…", key="judgment_input"):
         process_judgment_text(judgment_input)
         st.rerun()
 
-# Tab 3: Document Chat (new)
+# Tab 3: Document Chat
 with tab3:
-    st.title("📄 Document Chat Assistant")
-    st.markdown("Upload a PDF document and ask questions about its content.")
+    st.title("📄 Police Case Analysis Assistant")
     
-    # Document uploader
-    uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
+    # Document uploader (unchanged)
+    uploaded_file = st.file_uploader("Upload Case Document (PDF)", type=["pdf"])
     if uploaded_file:
-        with open("Document.pdf", "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        st.success("Document uploaded successfully!")
+        with st.spinner("Processing document..."):
+            with open("Document.pdf", "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            st.success("Document uploaded successfully!")
     
-    # Start session button
+    # Start session (unchanged)
     if not st.session_state.doc_session_started:
         if st.button("🚀 Start Document Session", type="primary"):
             with st.spinner("Creating document cache..."):
@@ -635,20 +646,31 @@ with tab3:
                     st.session_state.doc_session_started = True
                     st.rerun()
     
-    # Chat interface
+    # Chat interface with immediate display
     if st.session_state.doc_session_started and st.session_state.global_pdf_cache:
-        # Display chat history
+        # Display full history
         for q, a in st.session_state.doc_chat_history:
             with st.chat_message("user"):
                 st.markdown(q)
             with st.chat_message("assistant"):
                 st.markdown(a)
         
-        # Question input
-        question = st.chat_input("Ask about the document...")
-        if question:
+        # Input handling
+        if question := st.chat_input("Ask about the document..."):
+            # Show question immediately
+            with st.chat_message("user"):
+                st.markdown(question)
+            
+            # Add to history
             st.session_state.doc_chat_history.append((question, ""))
-            with st.spinner("Generating answer..."):
+            
+            # Generate answer
+            with st.spinner("Analyzing document..."):
                 answer = ask_document_question(st.session_state.global_pdf_cache, question)
                 st.session_state.doc_chat_history[-1] = (question, answer)
+            
+            # Show answer immediately
+            with st.chat_message("assistant"):
+                st.markdown(answer)
+            
             st.rerun()
