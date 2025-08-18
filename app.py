@@ -6,6 +6,10 @@ import os
 import json
 from dotenv import load_dotenv
 import PyPDF2
+import base64
+from datetime import datetime, timedelta
+import logging
+import hashlib
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -32,6 +36,8 @@ except AttributeError:
     st.error("🚨 Google API Key not found. Please set it in your .env file.", icon="🚨")
     st.stop()
 
+# --- Fixed Configuration Section ---
+# Move these to the top and ensure they're simple assignments
 LLM_MODEL_NAME = "gemini-2.5-flash"
 EMBEDDING_MODEL_NAME = "models/text-embedding-004"
 CHROMA_PATH = "fir_vector_db"
@@ -40,34 +46,40 @@ LLM_TEMPERATURE = 0.0
 MAX_OUTPUT_TOKENS = 65535
 USER_INPUT_CHAR_LIMIT = 400
 
+# --- Simplified Cached Functions ---
 @st.cache_resource(show_spinner=False)
 def _get_law_collection():
-    client = chromadb.PersistentClient(path=CHROMA_PATH)
-    return client.get_collection(LAW_COLLECTION_NAME)
+    """Simplified collection getter"""
+    try:
+        client = chromadb.PersistentClient(path=CHROMA_PATH)
+        return client.get_collection(LAW_COLLECTION_NAME)
+    except Exception as e:
+        st.error(f"Failed to connect to ChromaDB: {e}")
+        return None
 
-try:
-    law_collection = _get_law_collection()
-except Exception as e:
-    st.error(f"🚨 Failed to connect to the Vector Database. Have you run `load_law_corpus.py`? Error: {e}", icon="🚨")
-    st.stop()
-
-if "fir_messages" not in st.session_state: st.session_state.fir_messages = []
-if "judgment_messages" not in st.session_state: st.session_state.judgment_messages = []
-if "jurisdiction" not in st.session_state: st.session_state.jurisdiction = "Telangana"
-if "top_k_laws" not in st.session_state: st.session_state.top_k_laws = 5
-
-# --- COMMON UTILITY FUNCTIONS ---
 @st.cache_data(show_spinner=False)
 def translate_to_te(text: str) -> str:
-    """Translate text to Telugu using Gemini. Preserves legal meaning and formatting."""
-    text = (text or "").strip()
-    if not text: return ""
+    """Simplified translation function"""
+    if not text or not isinstance(text, str):
+        return ""
+    
     try:
-        model = genai.GenerativeModel(LLM_MODEL_NAME, generation_config={"response_mime_type": "text/plain", "temperature": 0.0, "max_output_tokens": 2048})
-        resp = model.generate_content(f"Translate to Telugu. Preserve legal meaning, names, and formatting. Only output the translation:\n\n{text}")
-        return (getattr(resp, "text", "") or "").strip()
-    except Exception: return text
+        model = genai.GenerativeModel(
+            LLM_MODEL_NAME,
+            generation_config={
+                "response_mime_type": "text/plain",
+                "temperature": 0.0,
+                "max_output_tokens": 2048,
+            }
+        )
+        resp = model.generate_content(
+            f"Translate to Telugu. Preserve legal meaning: {text}"
+        )
+        return getattr(resp, "text", "").strip()
+    except Exception:
+        return text
 
+# --- COMMON UTILITY FUNCTIONS ---
 def _fallback_te(te_val: str, en_val: str) -> str:
     """Fallback to English if Telugu translation is missing or invalid."""
     bads = {"", None, "తెలుగు పాఠ్యం సందర్భంలో అందించబడలేదు.", "తెలుగు అనువాదం అందుబాటులో లేదు", "N/A"}
@@ -353,12 +365,167 @@ def process_judgment_text(judgment_text: str):
         analysis_result = call_gemini_for_judgment(system_prompt)
     st.session_state.judgment_messages.append({"role": "assistant", "analysis_result": analysis_result or {}})
 
-# --- STREAMLIT UI LAYOUT ---
+# --- New Document Chat Setup ---
+# Load API Key (reuse existing Gemini setup)
+load_dotenv()
+API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+if not API_KEY:
+    st.error("❌ API Key not found in .env file")
+    st.stop()
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.FileHandler('api_calls.log'), logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+
+# Document Chat Constants
+PDF_TOKENS = 487000
+GLOBAL_CACHE_DURATION_HOURS = 24
+CACHE_STATUS_FILE = "global_cache_status.json"
+
+# Initialize session state for Document Chat
+if "global_pdf_cache" not in st.session_state:
+    st.session_state.global_pdf_cache = None
+if "doc_chat_history" not in st.session_state:
+    st.session_state.doc_chat_history = []
+if "doc_session_started" not in st.session_state:
+    st.session_state.doc_session_started = False
+
+# --- Document Chat Functions ---
+def get_pdf_hash():
+    """Get hash of the PDF file to detect changes"""
+    pdf_path = "Document.pdf"
+    if not os.path.exists(pdf_path):
+        return None
+    with open(pdf_path, "rb") as file:
+        return hashlib.md5(file.read()).hexdigest()
+
+def load_cache_status():
+    """Load global cache status from file"""
+    try:
+        if os.path.exists(CACHE_STATUS_FILE):
+            with open(CACHE_STATUS_FILE, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading cache status: {e}")
+    return None
+
+def save_cache_status(cache_name, created_at, pdf_hash):
+    """Save global cache status to file"""
+    try:
+        status = {
+            "cache_name": cache_name,
+            "created_at": created_at.isoformat(),
+            "pdf_hash": pdf_hash,
+            "ttl_hours": GLOBAL_CACHE_DURATION_HOURS
+        }
+        with open(CACHE_STATUS_FILE, 'w') as f:
+            json.dump(status, f)
+    except Exception as e:
+        logger.error(f"Error saving cache status: {e}")
+
+def is_global_cache_valid():
+    """Check if global cache is still valid"""
+    status = load_cache_status()
+    if not status:
+        return False, None
+    
+    current_pdf_hash = get_pdf_hash()
+    if current_pdf_hash != status.get("pdf_hash"):
+        logger.info("PDF has changed, cache invalid")
+        return False, None
+    
+    created_at = datetime.fromisoformat(status["created_at"])
+    elapsed = datetime.now() - created_at
+    if elapsed.total_seconds() > (GLOBAL_CACHE_DURATION_HOURS * 3600):
+        logger.info("Global cache expired")
+        return False, None
+    
+    return True, status["cache_name"]
+
+def create_global_pdf_cache():
+    """Create global cache from the pre-stored PDF file"""
+    pdf_path = "Document.pdf"
+    if not os.path.exists(pdf_path):
+        st.error(f"❌ {pdf_path} not found!")
+        return None
+        
+    with open(pdf_path, "rb") as file:
+        pdf_base64 = base64.b64encode(file.read()).decode('utf-8')
+    
+    pdf_hash = get_pdf_hash()
+    additional_text = "Please analyze this PDF document thoroughly. " * 2
+    
+    pdf_content = {
+        "role": "user",
+        "parts": [
+            {"text": f"Here is the PDF document to analyze: {additional_text}"},
+            {"inline_data": {"mime_type": "application/pdf", "data": pdf_base64}}
+        ]
+    }
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    cache_name = f"global_pdf_cache_{timestamp}"
+    
+    cache = genai.caching.CachedContent.create(
+        model="models/gemini-1.5-flash-002",
+        display_name=cache_name,
+        system_instruction="You are an expert document analyzer. Answer user questions based on the PDF document.",
+        contents=[pdf_content],
+        ttl=timedelta(hours=GLOBAL_CACHE_DURATION_HOURS),
+    )
+    
+    save_cache_status(cache.name, datetime.now(), pdf_hash)
+    return cache
+
+def get_or_create_global_cache():
+    """Get existing global cache or create new one"""
+    is_valid, cache_name = is_global_cache_valid()
+    if is_valid and cache_name:
+        try:
+            return genai.caching.CachedContent.get(cache_name)
+        except Exception as e:
+            logger.error(f"Error retrieving cache: {e}")
+    return None
+
+def ask_document_question(cache, question):
+    model = genai.GenerativeModel.from_cached_content(cached_content=cache)
+    response = model.generate_content(question)
+    return response.text
+
+# --- Updated Streamlit UI ---
 st.title("⚖️ Police AI Analysis Assistant")
 st.warning("**Disclaimer:** For internal police use only. All outputs must be verified by a qualified officer. Do not include sensitive PII.", icon="⚠️")
-tab1, tab2 = st.tabs(["⚖️ FIR Analysis", "📜 Judgment Analysis"])
 
-# --- TAB 1: FIR ANALYSIS ---
+# Initialize all session state variables
+if "fir_messages" not in st.session_state:
+    st.session_state.fir_messages = []
+if "judgment_messages" not in st.session_state:
+    st.session_state.judgment_messages = []
+if "jurisdiction" not in st.session_state:
+    st.session_state.jurisdiction = "Telangana"
+if "top_k_laws" not in st.session_state:
+    st.session_state.top_k_laws = 5
+if "global_pdf_cache" not in st.session_state:
+    st.session_state.global_pdf_cache = None
+if "doc_chat_history" not in st.session_state:
+    st.session_state.doc_chat_history = []
+if "doc_session_started" not in st.session_state:
+    st.session_state.doc_session_started = False
+if "analysis_result" not in st.session_state:
+    st.session_state.analysis_result = None
+if "fir_text" not in st.session_state:
+    st.session_state.fir_text = ""
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# Create 3 tabs
+tab1, tab2, tab3 = st.tabs(["⚖️ FIR Analysis", "📜 Judgment Analysis", "📄 Police Case Analysis Assistant"])
+
+# Tab 1: FIR Analysis (existing)
 with tab1:
     st.info("Paste FIRs to analyze against BNS/CrPC sections.")  # Updated
     
@@ -399,7 +566,7 @@ with tab1:
             
             st.rerun()
 
-# --- TAB 2: JUDGMENT ANALYSIS ---
+# Tab 2: Judgment Analysis (existing)
 with tab2:
     st.info("Upload or paste the full text of a court judgment for a detailed summary and analysis.")
     
@@ -446,3 +613,42 @@ with tab2:
     if judgment_input := st.chat_input("Or paste court judgment text here…", key="judgment_input"):
         process_judgment_text(judgment_input)
         st.rerun()
+
+# Tab 3: Document Chat (new)
+with tab3:
+    st.title("📄 Document Chat Assistant")
+    st.markdown("Upload a PDF document and ask questions about its content.")
+    
+    # Document uploader
+    uploaded_file = st.file_uploader("Upload PDF", type=["pdf"])
+    if uploaded_file:
+        with open("Document.pdf", "wb") as f:
+            f.write(uploaded_file.getbuffer())
+        st.success("Document uploaded successfully!")
+    
+    # Start session button
+    if not st.session_state.doc_session_started:
+        if st.button("🚀 Start Document Session", type="primary"):
+            with st.spinner("Creating document cache..."):
+                st.session_state.global_pdf_cache = create_global_pdf_cache()
+                if st.session_state.global_pdf_cache:
+                    st.session_state.doc_session_started = True
+                    st.rerun()
+    
+    # Chat interface
+    if st.session_state.doc_session_started and st.session_state.global_pdf_cache:
+        # Display chat history
+        for q, a in st.session_state.doc_chat_history:
+            with st.chat_message("user"):
+                st.markdown(q)
+            with st.chat_message("assistant"):
+                st.markdown(a)
+        
+        # Question input
+        question = st.chat_input("Ask about the document...")
+        if question:
+            st.session_state.doc_chat_history.append((question, ""))
+            with st.spinner("Generating answer..."):
+                answer = ask_document_question(st.session_state.global_pdf_cache, question)
+                st.session_state.doc_chat_history[-1] = (question, answer)
+            st.rerun()
