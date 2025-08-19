@@ -278,6 +278,7 @@ INSTRUCTIONS:
 - Reference specific parts of the documents when relevant
 - Provide actionable insights for police investigation when appropriate
 
+**IMPORTANT: use the same text as it is in the document. **
 CONTEXT FROM CASE DOCUMENTS:
 {context_text}
 
@@ -289,7 +290,7 @@ Provide a comprehensive answer based on the available context."""
         model = genai.GenerativeModel(
             LLM_MODEL_NAME,
             generation_config={
-                "temperature": 0.1,
+                "temperature": 0,
                 "max_output_tokens": 4096,
             }
         )
@@ -623,9 +624,7 @@ with tab3:
                 st.markdown(q)
             with st.chat_message("assistant"):
                 st.markdown(a)
-                if sources:
-                    with st.expander("📚 View Sources", expanded=False):
-                        render_sources(sources.get('sources', []), sources.get('distances', []))
+                # Removed the expander for sources
         
         # Chat interface
         if question := st.chat_input("Ask about your case documents...", key="doc_chat_input"):
@@ -669,12 +668,6 @@ with tab3:
             # Show response immediately
             with st.chat_message("assistant"):
                 st.markdown(st.session_state.doc_chat_history[-1][1])
-                if st.session_state.doc_chat_history[-1][2]:
-                    with st.expander("📚 View Sources", expanded=False):
-                        render_sources(
-                            st.session_state.doc_chat_history[-1][2].get('sources', []), 
-                            st.session_state.doc_chat_history[-1][2].get('distances', [])
-                        )
             
             st.rerun()
             
