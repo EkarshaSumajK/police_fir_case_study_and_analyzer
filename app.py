@@ -24,6 +24,10 @@ _APP_STYLE = """
 :root { --bg: #ffffff; --card-bg: #ffffff; --text: #111827; --muted: #6b7280; --border: rgba(0,0,0,0.08); --shadow: 0 1px 2px rgba(0,0,0,0.05); --quote-bg: #0e1117; --quote-text: #e6e6e6; --badge-green-bg: #e7f7ef; --badge-green-text: #127c51; --badge-amber-bg: #fff3e0; --badge-amber-text: #8a5a00; --badge-red-bg: #fdecea; --badge-red-text: #8a1c1c; --divider: rgba(0,0,0,0.08); }
 @media (prefers-color-scheme: dark) { :root { --bg: #0b0f14; --card-bg: #111827; --text: #e5e7eb; --muted: #9ca3af; --border: rgba(255,255,255,0.08); --shadow: 0 1px 2px rgba(0,0,0,0.3); --quote-bg: #0b0f14; --quote-text: #e5e7eb; --badge-green-bg: #0f2e24; --badge-green-text: #34d399; --badge-amber-bg: #2a1e0a; --badge-amber-text: #fbbf24; --badge-red-bg: #2a0f0f; --badge-red-text: #f87171; --divider: rgba(255,255,255,0.08); } }
 .main > div { padding-top: 0.75rem; color: var(--text); } .card { border: 1px solid var(--border); border-radius: 12px; padding: 1rem 1.25rem; background: var(--card-bg); box-shadow: var(--shadow); } .badge { display:inline-block; padding:0.25rem 0.6rem; border-radius:999px; font-size:0.8rem; font-weight:600; margin-left:0.5rem; } .badge-green { background:var(--badge-green-bg); color:var(--badge-green-text); } .badge-amber { background:var(--badge-amber-bg); color:var(--badge-amber-text); } .badge-red { background:var(--badge-red-bg); color:var(--badge-red-text); } .quote-block { background:var(--quote-bg); color:var(--quote-text); padding:0.75rem 0.9rem; border-radius:8px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; white-space: pre-wrap; } .divider { height:1px; background:var(--divider); margin:0.75rem 0 1rem; } .small-muted { color: var(--muted); font-size: 0.85rem; }
+.source-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem; margin: 0.5rem 0; }
+.confidence-high { border-left: 4px solid #22c55e; } .confidence-medium { border-left: 4px solid #f59e0b; } .confidence-low { border-left: 4px solid #ef4444; }
+.chunk-text { background: var(--quote-bg); color: var(--quote-text); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.9rem; line-height: 1.4; margin-top: 0.5rem; border-left: 3px solid var(--muted); max-height: 200px; overflow-y: auto; }
+.chunk-preview { background: var(--quote-bg); color: var(--quote-text); padding: 0.5rem 0.75rem; border-radius: 6px; font-size: 0.85rem; line-height: 1.4; margin-top: 0.5rem; border-left: 3px solid var(--muted); }
 </style>
 """
 st.markdown(_APP_STYLE, unsafe_allow_html=True)
@@ -37,11 +41,12 @@ except AttributeError:
     st.stop()
 
 # --- Fixed Configuration Section ---
-# Move these to the top and ensure they're simple assignments
 LLM_MODEL_NAME = "gemini-2.5-flash"
 EMBEDDING_MODEL_NAME = "models/text-embedding-004"
-CHROMA_PATH = "fir_vector_db"
+CHROMA_PATH = "fir_vector_db"  # For laws collection
+DOCUMENTS_CHROMA_PATH = "police_vector_db"  # For case documents collection
 LAW_COLLECTION_NAME = "laws_collection"
+DOCUMENTS_COLLECTION_NAME = "documents_collection"  # Case documents collection
 LLM_TEMPERATURE = 0.0
 MAX_OUTPUT_TOKENS = 65535
 USER_INPUT_CHAR_LIMIT = 400
@@ -55,6 +60,16 @@ def _get_law_collection():
         return client.get_collection(LAW_COLLECTION_NAME)
     except Exception as e:
         st.error(f"Failed to connect to ChromaDB: {e}")
+        return None
+
+@st.cache_resource(show_spinner=False)
+def _get_documents_collection():
+    """Get documents collection for case documents"""
+    try:
+        client = chromadb.PersistentClient(path=DOCUMENTS_CHROMA_PATH)  # Different path
+        return client.get_collection(DOCUMENTS_COLLECTION_NAME)
+    except Exception as e:
+        st.error(f"Failed to connect to Documents ChromaDB: {e}")
         return None
 
 @st.cache_data(show_spinner=False)
@@ -115,11 +130,13 @@ def call_gemini_for_fir(system_prompt):
         return None
 
 def _embed_query_text(text: str):
-    """Embed query text for FIR analysis."""
+    """Embed query text for analysis."""
     try:
         result = genai.embed_content(model=EMBEDDING_MODEL_NAME, content=text, task_type="RETRIEVAL_QUERY")
         return result["embedding"]
-    except Exception as e: st.error(f"Failed to embed query text: {e}"); return None
+    except Exception as e: 
+        st.error(f"Failed to embed query text: {e}")
+        return None
 
 # --- ChromaDB Initialization ---
 @st.cache_resource(show_spinner=False)
@@ -132,13 +149,23 @@ def get_law_collection():
         st.error(f"🚨 Failed to connect to Vector Database: {e}")
         st.stop()
 
-# Initialize collection at startup
+@st.cache_resource(show_spinner=False)
+def get_documents_collection():
+    """Initialize and return the documents ChromaDB collection"""
+    try:
+        client = chromadb.PersistentClient(path=DOCUMENTS_CHROMA_PATH)  # Different path
+        return client.get_collection(DOCUMENTS_COLLECTION_NAME)
+    except Exception as e:
+        return None  # Don't stop app if documents collection doesn't exist yet
+
+# Initialize collections at startup
 law_collection = get_law_collection()
+documents_collection = get_documents_collection()
 
 @st.cache_data(show_spinner=False)
 def retrieve_law_sections(query_text, k=5):
     """Retrieve relevant law sections from ChromaDB"""
-    if not law_collection:  # Check if collection exists
+    if not law_collection:
         st.error("Law collection not available")
         return []
     
@@ -152,6 +179,31 @@ def retrieve_law_sections(query_text, k=5):
         include=["metadatas"],
     )
     return results['metadatas'][0] if results and results.get('metadatas') else []
+
+@st.cache_data(show_spinner=False)
+def retrieve_case_documents(query_text, k=5):
+    """Retrieve relevant case document chunks from ChromaDB"""
+    if not documents_collection:
+        return []
+    
+    embedding = _embed_query_text(query_text)
+    if embedding is None:
+        return []
+        
+    try:
+        results = documents_collection.query(
+            query_embeddings=[embedding],
+            n_results=k,
+            include=["documents", "metadatas", "distances"],
+        )
+        return {
+            'documents': results.get('documents', [[]])[0],
+            'metadatas': results.get('metadatas', [[]])[0],
+            'distances': results.get('distances', [[]])[0]
+        }
+    except Exception as e:
+        st.error(f"Error retrieving case documents: {e}")
+        return []
 
 # --- FIR Analysis Prompt ---
 def build_fir_system_prompt(fir_summary, relevant_laws, jurisdiction):
@@ -198,15 +250,117 @@ IMPORTANT: Your final output must be a valid JSON object matching this schema:
 """
     return prompt
 
+# --- Document Chat Functions ---
+def generate_contextual_response(question: str, context_chunks: list, metadata: list):
+    """Generate response using retrieved context chunks"""
+    
+    # Build context from retrieved chunks
+    context_text = ""
+    source_info = []
+    
+    for i, (chunk, meta) in enumerate(zip(context_chunks, metadata)):
+        context_text += f"\n[Source {i+1}]: {chunk}\n"
+        source_info.append({
+            'chunk_index': i+1,
+            'document': meta.get('document_name', 'Unknown'),
+            'chunk_id': meta.get('chunk_index', 'N/A'),
+            'file_type': meta.get('file_type', 'unknown'),
+            'chunk_text': chunk  # Add the actual chunk text here
+        })
+    
+    # Create prompt for the AI model
+    system_prompt = f"""You are an expert police case analysis assistant. Answer the user's question based on the provided case document context. 
+
+INSTRUCTIONS:
+- Use only the information provided in the context
+- If the context doesn't contain enough information to answer the question, say so clearly
+- Be precise and factual in your analysis
+- Reference specific parts of the documents when relevant
+- Provide actionable insights for police investigation when appropriate
+
+CONTEXT FROM CASE DOCUMENTS:
+{context_text}
+
+USER QUESTION: {question}
+
+Provide a comprehensive answer based on the available context."""
+
+    try:
+        model = genai.GenerativeModel(
+            LLM_MODEL_NAME,
+            generation_config={
+                "temperature": 0.1,
+                "max_output_tokens": 4096,
+            }
+        )
+        response = model.generate_content(system_prompt)
+        return response.text, source_info
+    except Exception as e:
+        st.error(f"Error generating response: {e}")
+        return "I apologize, but I encountered an error while analyzing the documents.", []
+
+def render_sources(sources: list, distances: list = None):
+    """Render source information with confidence indicators and chunk text"""
+    if not sources:
+        return
+    
+    st.markdown("### 📚 Sources Used")
+    
+    for i, source in enumerate(sources):
+        # Determine confidence based on distance (if available)
+        confidence_class = "confidence-medium"
+        confidence_text = "Medium"
+        
+        if distances and i < len(distances):
+            distance = distances[i]
+            if distance < 0.3:
+                confidence_class = "confidence-high"
+                confidence_text = "High"
+            elif distance > 0.7:
+                confidence_class = "confidence-low"
+                confidence_text = "Low"
+        
+        # Get chunk text and create preview
+        chunk_text = source.get('chunk_text', '')
+        chunk_preview = chunk_text[:200] + "..." if len(chunk_text) > 200 else chunk_text
+        
+        st.markdown(f"""
+        <div class="source-card {confidence_class}">
+            <strong>📄 {source['document']}</strong> 
+            <span class="badge badge-amber">Chunk {source['chunk_id']}</span>
+            <span class="badge badge-green">Confidence: {confidence_text}</span>
+            <br>
+            <span class="small-muted">File type: {source['file_type'].upper()}</span>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Show chunk preview
+        if chunk_preview:
+            st.markdown(f"""
+            <div class="chunk-preview">
+                <strong>📄 Content Preview:</strong><br>
+                {chunk_preview}
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Add expandable section for full chunk text if it's long
+        if len(chunk_text) > 200:
+            # Remove the inner expander and directly show the full chunk text
+            st.markdown(f"""
+            <div class="chunk-text">
+            {chunk_text}
+            </div>
+            """, unsafe_allow_html=True)
+
 # --- FIR Render Function ---
 def _render_fir_analysis(res: dict):
     """Renders the structured JSON output for FIR analysis."""
     if not res: st.info("No analysis available."); return
-    st.subheader("✅ Recommended BNS/CrPC Sections")  # Updated
+    st.subheader("✅ Recommended BNS/CrPC Sections")
     if res.get("sections"):
         for sec in res["sections"]:
             law = sec.get("law_citation", {}) or {}
-            section_label = sec.get("section", "N/A").replace("IPC", "BNS")  # Updated
+            section_label = sec.get("section", "N/A").replace("IPC", "BNS")
             st.markdown(f"<div class='card'><strong>Section:</strong> <code>{section_label}</code>", unsafe_allow_html=True)
             
             col_en, col_te = st.columns(2)
@@ -277,24 +431,8 @@ def build_judgment_prompt(judgment_text: str):
     json_schema = {
         "summary_en": "A comprehensive and in-depth summary of the entire judgment, covering the case background, key arguments, the court's reasoning, and the final verdict. Should be several paragraphs long.",
         "summary_te": "A comprehensive and in-depth summary in Telugu, translated faithfully from the English version.",
-        
     }
-    # "facts_of_the_case_en": "Key facts of the case presented in English.",
-        # "facts_of_the_case_te": "Key facts of the case in Telugu.",
-        # "parties_arguments": {
-        #     "petitioner_en": "Summary of petitioner/appellant arguments.",
-        #     "petitioner_te": "Summary in Telugu.",
-        #     "respondent_en": "Summary of respondent arguments.",
-        #     "respondent_te": "Summary in Telugu."
-        # },
-        # "key_legal_issues_en": ["List of legal questions addressed by the court in English."],
-        # "key_legal_issues_te": ["List of legal questions in Telugu."],
-        # "final_verdict_en": "The final decision or ruling of the court in English.",
-        # "final_verdict_te": "The final decision in Telugu.",
-        # "legal_principles_cited": [{
-        #     "principle": "Name or description of the legal principle or precedent.",
-        #     "citation": "Case law or statute cited."
-        # }]
+    
     prompt = f"""You are an expert AI legal analyst. Your task is to read the following court judgment and provide a detailed, structured analysis.
 
     Analysis Requirements:
@@ -326,7 +464,6 @@ def _render_judgment_analysis(res: dict):
 
     st.markdown("<div class='card'>", unsafe_allow_html=True)
     
-    # Only show summary_en and summary_te (schema-compliant)
     st.subheader("📜 Judgment Summary")
     col_s_en, col_s_te = st.columns(2)
     with col_s_en:
@@ -346,142 +483,7 @@ def process_judgment_text(judgment_text: str):
         analysis_result = call_gemini_for_judgment(system_prompt)
     st.session_state.judgment_messages.append({"role": "assistant", "analysis_result": analysis_result or {}})
 
-# --- New Document Chat Setup ---
-# Load API Key (reuse existing Gemini setup)
-load_dotenv()
-API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-if not API_KEY:
-    st.error("❌ API Key not found in .env file")
-    st.stop()
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.FileHandler('api_calls.log'), logging.StreamHandler()]
-)
-logger = logging.getLogger(__name__)
-
-# Document Chat Constants
-PDF_TOKENS = 487000
-GLOBAL_CACHE_DURATION_HOURS = 24
-CACHE_STATUS_FILE = "global_cache_status.json"
-
-# Initialize session state for Document Chat
-if "global_pdf_cache" not in st.session_state:
-    st.session_state.global_pdf_cache = None
-if "doc_chat_history" not in st.session_state:
-    st.session_state.doc_chat_history = []
-if "doc_session_started" not in st.session_state:
-    st.session_state.doc_session_started = False
-
-# --- Document Chat Functions ---
-def get_pdf_hash():
-    """Get hash of the PDF file to detect changes"""
-    pdf_path = "Document.pdf"
-    if not os.path.exists(pdf_path):
-        return None
-    with open(pdf_path, "rb") as file:
-        return hashlib.md5(file.read()).hexdigest()
-
-def load_cache_status():
-    """Load global cache status from file"""
-    try:
-        if os.path.exists(CACHE_STATUS_FILE):
-            with open(CACHE_STATUS_FILE, 'r') as f:
-                return json.load(f)
-    except Exception as e:
-        logger.error(f"Error loading cache status: {e}")
-    return None
-
-def save_cache_status(cache_name, created_at, pdf_hash):
-    """Save global cache status to file"""
-    try:
-        status = {
-            "cache_name": cache_name,
-            "created_at": created_at.isoformat(),
-            "pdf_hash": pdf_hash,
-            "ttl_hours": GLOBAL_CACHE_DURATION_HOURS
-        }
-        with open(CACHE_STATUS_FILE, 'w') as f:
-            json.dump(status, f)
-    except Exception as e:
-        logger.error(f"Error saving cache status: {e}")
-
-def is_global_cache_valid():
-    """Check if global cache is still valid"""
-    status = load_cache_status()
-    if not status:
-        return False, None
-    
-    current_pdf_hash = get_pdf_hash()
-    if current_pdf_hash != status.get("pdf_hash"):
-        logger.info("PDF has changed, cache invalid")
-        return False, None
-    
-    created_at = datetime.fromisoformat(status["created_at"])
-    elapsed = datetime.now() - created_at
-    if elapsed.total_seconds() > (GLOBAL_CACHE_DURATION_HOURS * 3600):
-        logger.info("Global cache expired")
-        return False, None
-    
-    return True, status["cache_name"]
-
-def create_global_pdf_cache():
-    """Create global cache from the pre-stored PDF file"""
-    pdf_path = "Document.pdf"
-    if not os.path.exists(pdf_path):
-        st.error(f"❌ {pdf_path} not found!")
-        return None
-        
-    with open(pdf_path, "rb") as file:
-        pdf_base64 = base64.b64encode(file.read()).decode('utf-8')
-    
-    pdf_hash = get_pdf_hash()
-    additional_text = "Please analyze this PDF document thoroughly. " * 2
-    
-    pdf_content = {
-        "role": "user",
-        "parts": [
-            {"text": f"Here is the PDF document to analyze: {additional_text}"},
-            {"inline_data": {"mime_type": "application/pdf", "data": pdf_base64}}
-        ]
-    }
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    cache_name = f"global_pdf_cache_{timestamp}"
-    
-    cache = genai.caching.CachedContent.create(
-        model="models/gemini-1.5-flash-002",
-        display_name=cache_name,
-        system_instruction="You are an expert document analyzer. Answer user questions based on the PDF document.",
-        contents=[pdf_content],
-        ttl=timedelta(hours=GLOBAL_CACHE_DURATION_HOURS),
-    )
-    
-    save_cache_status(cache.name, datetime.now(), pdf_hash)
-    return cache
-
-def get_or_create_global_cache():
-    """Get existing global cache or create new one"""
-    is_valid, cache_name = is_global_cache_valid()
-    if is_valid and cache_name:
-        try:
-            return genai.caching.CachedContent.get(cache_name)
-        except Exception as e:
-            logger.error(f"Error retrieving cache: {e}")
-    return None
-
-def ask_document_question(cache, question):
-    model = genai.GenerativeModel.from_cached_content(cached_content=cache)
-    response = model.generate_content(question)
-    return response.text
-
-# --- Updated Streamlit UI ---
-st.title("⚖️ Police AI Analysis Assistant")
-st.warning("**Disclaimer:** For internal police use only. All outputs must be verified by a qualified officer. Do not include sensitive PII.", icon="⚠️")
-
-# Initialize all session state variables
+# --- Initialize all session state variables ---
 if "fir_messages" not in st.session_state:
     st.session_state.fir_messages = []
 if "judgment_messages" not in st.session_state:
@@ -490,12 +492,8 @@ if "jurisdiction" not in st.session_state:
     st.session_state.jurisdiction = "Telangana"
 if "top_k_laws" not in st.session_state:
     st.session_state.top_k_laws = 5
-if "global_pdf_cache" not in st.session_state:
-    st.session_state.global_pdf_cache = None
 if "doc_chat_history" not in st.session_state:
     st.session_state.doc_chat_history = []
-if "doc_session_started" not in st.session_state:
-    st.session_state.doc_session_started = False
 if "analysis_result" not in st.session_state:
     st.session_state.analysis_result = None
 if "fir_text" not in st.session_state:
@@ -503,44 +501,17 @@ if "fir_text" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# --- Updated Streamlit UI ---
+st.title("⚖️ Police AI Analysis Assistant")
+st.warning("**Disclaimer:** For internal police use only. All outputs must be verified by a qualified officer. Do not include sensitive PII.", icon="⚠️")
+
 # Create 3 tabs
 tab1, tab2, tab3 = st.tabs(["⚖️ FIR Analysis", "📜 Judgment Analysis", "📄 Police Case Analysis Assistant"])
 
-# Common UI pattern for all tabs
-def chat_interface(messages, process_callback, placeholder_text, key_prefix=""):
-    """Reusable chat interface component"""
-    # Display message history
-    for msg in messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            if msg.get("analysis_result"):
-                if "fir" in key_prefix:
-                    _render_fir_analysis(msg["analysis_result"])
-                elif "judgment" in key_prefix:
-                    _render_judgment_analysis(msg["analysis_result"])
-    
-    # Persistent input with immediate display
-    if prompt := st.chat_input(placeholder_text, key=f"{key_prefix}input"):
-        # Add user message immediately
-        messages.append({"role": "user", "content": prompt})
-        
-        # Process with callback
-        with st.spinner("Analyzing..."):
-            result = process_callback(prompt)
-            messages.append({
-                "role": "assistant",
-                "content": "Analysis complete",
-                "analysis_result": result
-            })
-        
-        # Rerun to update while preserving input
-        st.rerun()
-
-# Tab 1: FIR Analysis
+# Tab 1: FIR Analysis (unchanged)
 with tab1:
     st.info("Paste FIRs to analyze against BNS/CrPC sections.")
     
-    # Default number of recommended sections
     DEFAULT_SECTIONS = 5
     
     def process_fir_input(text):
@@ -548,23 +519,18 @@ with tab1:
         system_prompt = build_fir_system_prompt(text, relevant_laws, st.session_state.jurisdiction)
         return call_gemini_for_fir(system_prompt)
     
-    # Display chat history
     for msg in st.session_state.fir_messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
             if msg["role"] == "assistant" and "analysis_result" in msg:
                 _render_fir_analysis(msg["analysis_result"])
     
-    # Chat input
     if fir_input := st.chat_input("Enter FIR or case details...", key="fir_input"):
-        # Immediately display the user input in the chat interface
         with st.chat_message("user"):
             st.markdown(fir_input)
         
-        # Append user input to session state
         st.session_state.fir_messages.append({"role": "user", "content": fir_input})
         
-        # Show spinner and process analysis
         with st.spinner(f"Analyzing for relevant BNS/CrPC sections..."):
             analysis_result = process_fir_input(fir_input)
             st.session_state.fir_messages.append({
@@ -573,10 +539,9 @@ with tab1:
                 "analysis_result": analysis_result
             })
         
-        # Trigger rerun to update the interface with the assistant's response
         st.rerun()
 
-# Tab 2: Judgment Analysis
+# Tab 2: Judgment Analysis (unchanged)
 with tab2:
     st.info("Upload or paste the full text of a court judgment for a detailed summary and analysis.")
     
@@ -625,52 +590,158 @@ with tab2:
         process_judgment_text(judgment_input)
         st.rerun()
 
-# Tab 3: Document Chat
+# Tab 3: Updated Document Chat with ChromaDB
 with tab3:
     st.title("📄 Police Case Analysis Assistant")
     
-    # Document uploader (unchanged)
-    uploaded_file = st.file_uploader("Upload Case Document (PDF)", type=["pdf"])
-    if uploaded_file:
-        with st.spinner("Processing document..."):
-            with open("Document.pdf", "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            st.success("Document uploaded successfully!")
-    
-    # Start session (unchanged)
-    if not st.session_state.doc_session_started:
-        if st.button("🚀 Start Document Session", type="primary"):
-            with st.spinner("Creating document cache..."):
-                st.session_state.global_pdf_cache = create_global_pdf_cache()
-                if st.session_state.global_pdf_cache:
-                    st.session_state.doc_session_started = True
-                    st.rerun()
-    
-    # Chat interface with immediate display
-    if st.session_state.doc_session_started and st.session_state.global_pdf_cache:
-        # Display full history
-        for q, a in st.session_state.doc_chat_history:
+    # Check if documents collection exists and show status
+    if documents_collection:
+        doc_count = documents_collection.count()
+        # st.success(f"✅ Connected to case documents database ({doc_count} document chunks available)")
+        
+        # Show collection statistics
+        # col1, col2, col3 = st.columns(3)
+        # with col1:
+        #     st.metric("📄 Document Chunks", doc_count)
+        # with col2:
+        #     # Get unique documents
+        #     try:
+        #         all_metadata = documents_collection.get(include=["metadatas"])
+        #         unique_docs = len(set(meta.get('document_name', 'Unknown') 
+        #                             for meta in all_metadata['metadatas']))
+        #         st.metric("📋 Unique Documents", unique_docs)
+        #     except:
+        #         st.metric("📋 Unique Documents", "N/A")
+        # with col3:
+        #     st.metric("🔍 Search Ready", "Yes" if doc_count > 0 else "No")
+        
+        st.markdown("---")
+        
+        # Display chat history
+        for q, a, sources in st.session_state.doc_chat_history:
             with st.chat_message("user"):
                 st.markdown(q)
             with st.chat_message("assistant"):
                 st.markdown(a)
+                if sources:
+                    with st.expander("📚 View Sources", expanded=False):
+                        render_sources(sources.get('sources', []), sources.get('distances', []))
         
-        # Input handling
-        if question := st.chat_input("Ask about the document..."):
+        # Chat interface
+        if question := st.chat_input("Ask about your case documents...", key="doc_chat_input"):
             # Show question immediately
             with st.chat_message("user"):
                 st.markdown(question)
             
-            # Add to history
-            st.session_state.doc_chat_history.append((question, ""))
+            # Add placeholder to history
+            st.session_state.doc_chat_history.append((question, "", {}))
             
-            # Generate answer
-            with st.spinner("Analyzing document..."):
-                answer = ask_document_question(st.session_state.global_pdf_cache, question)
-                st.session_state.doc_chat_history[-1] = (question, answer)
+            # Retrieve relevant context and generate response
+            with st.spinner("🔍 Searching case documents and generating analysis..."):
+                try:
+                    # Retrieve relevant chunks
+                    retrieval_results = retrieve_case_documents(question, k=5)
+                    
+                    if retrieval_results and retrieval_results.get('documents'):
+                        # Generate contextual response
+                        response, source_info = generate_contextual_response(
+                            question, 
+                            retrieval_results['documents'], 
+                            retrieval_results['metadatas']
+                        )
+                        
+                        # Prepare source information for display
+                        sources_data = {
+                            'sources': source_info,
+                            'distances': retrieval_results.get('distances', [])
+                        }
+                    else:
+                        response = "I couldn't find any relevant information in the case documents to answer your question. Please make sure your documents have been properly ingested into the database."
+                        sources_data = {}
+                    
+                    # Update history with actual response
+                    st.session_state.doc_chat_history[-1] = (question, response, sources_data)
+                    
+                except Exception as e:
+                    error_response = f"I encountered an error while searching the documents: {str(e)}"
+                    st.session_state.doc_chat_history[-1] = (question, error_response, {})
             
-            # Show answer immediately
+            # Show response immediately
             with st.chat_message("assistant"):
-                st.markdown(answer)
+                st.markdown(st.session_state.doc_chat_history[-1][1])
+                if st.session_state.doc_chat_history[-1][2]:
+                    with st.expander("📚 View Sources", expanded=False):
+                        render_sources(
+                            st.session_state.doc_chat_history[-1][2].get('sources', []), 
+                            st.session_state.doc_chat_history[-1][2].get('distances', [])
+                        )
             
+            st.rerun()
+            
+    else:
+        # No documents collection found
+        st.warning("📋 No case documents database found")
+        st.info("""
+        **To use the Case Analysis Assistant:**
+        
+        1. **Ingest Documents**: Use the parallel document ingestion script to process your case documents
+        2. **Run the ingestion script**: 
+           ```bash
+           python parallel_ingestion.py
+           ```
+        3. **Add your documents** to the `documents/` folder (PDF, TXT, MD files)
+        4. **Refresh this page** after ingestion is complete
+        
+        The system will create a `police_vector_db` database with your case documents for searchable analysis.
+        """)
+        
+        # Show ingestion instructions
+        with st.expander("🔧 Document Ingestion Instructions", expanded=True):
+            st.markdown("""
+            ### Step-by-Step Setup:
+            
+            **1. Prepare Your Documents**
+            - Create a `documents/` folder in your project directory
+            - Add case files: PDF reports, text statements, evidence logs, etc.
+            - Supported formats: `.pdf`, `.txt`, `.md`
+            
+            **2. Run Document Ingestion**
+            ```bash
+            python parallel_ingestion.py
+            ```
+            
+            **3. Database Location**
+            - Case documents will be stored in: `police_vector_db/`
+            - This is separate from the laws database (`fir_vector_db/`)
+            - Each document is chunked and embedded for semantic search
+            
+            **4. Start Analysis**
+            - Refresh this page after ingestion completes
+            - Ask questions about your case documents
+            - Get contextual answers with source citations
+            
+            ### Example Questions:
+            - "What are the key facts mentioned in the police report?"
+            - "Who are the witnesses mentioned in the case?"
+            - "What evidence was collected?"
+            - "Summarize the incident timeline"
+            - "What charges are recommended based on the evidence?"
+            """)
+        
+        # Show current database paths for clarity
+        with st.expander("🗄️ Database Configuration", expanded=False):
+            st.markdown(f"""
+            **Database Paths:**
+            - **Laws Database**: `{CHROMA_PATH}/` (for BNS/CrPC sections)
+            - **Case Documents Database**: `{DOCUMENTS_CHROMA_PATH}/` (for your case files)
+            
+            **Collections:**
+            - **Laws Collection**: `{LAW_COLLECTION_NAME}`
+            - **Documents Collection**: `{DOCUMENTS_COLLECTION_NAME}`
+            
+            Make sure your parallel ingestion script uses the same paths!
+            """)
+        
+        # Quick status check
+        if st.button("🔄 Check for Documents Database", type="secondary"):
             st.rerun()
