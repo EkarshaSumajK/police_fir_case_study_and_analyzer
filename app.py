@@ -10,6 +10,8 @@ import base64
 from datetime import datetime, timedelta
 import logging
 import hashlib
+from pathlib import Path
+from PyPDF2 import PdfReader
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(
@@ -151,12 +153,75 @@ def get_law_collection():
 
 @st.cache_resource(show_spinner=False)
 def get_documents_collection():
-    """Initialize and return the documents ChromaDB collection"""
+    """Initialize and return the documents ChromaDB collection, create if not exists"""
     try:
-        client = chromadb.PersistentClient(path=DOCUMENTS_CHROMA_PATH)  # Different path
-        return client.get_collection(DOCUMENTS_COLLECTION_NAME)
+        client = chromadb.PersistentClient(path=DOCUMENTS_CHROMA_PATH)
+        return client.get_or_create_collection(DOCUMENTS_COLLECTION_NAME)
     except Exception as e:
-        return None  # Don't stop app if documents collection doesn't exist yet
+        st.error(f"Failed to connect to Documents ChromaDB: {e}")
+        return None
+
+def extract_text_from_pdf(pdf_file):
+    """Extract text from PDF file-like object"""
+    reader = PdfReader(pdf_file)
+    text = ""
+    for page in reader.pages:
+        text += page.extract_text() + "\n"
+    return text
+
+def chunk_text(text, chunk_size=1000, overlap=200):
+    """Split text into overlapping chunks"""
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunk = text[start:end]
+        chunks.append(chunk)
+        start = end - overlap
+    return [chunk for chunk in chunks if len(chunk.strip()) >= 50]
+
+def ingest_document(collection, file):
+    """Process and ingest a single PDF document"""
+    text = extract_text_from_pdf(file)
+    chunks = chunk_text(text)
+    
+    if not chunks:
+        return False
+    
+    documents = []
+    metadatas = []
+    embeddings = []
+    ids = []
+    
+    file_name = file.name
+    for i, chunk in enumerate(chunks):
+        chunk_id = f"{Path(file_name).stem}_{i}_{hashlib.md5(chunk.encode()).hexdigest()[:8]}"
+        
+        embedding = genai.embed_content(
+            model=EMBEDDING_MODEL_NAME,
+            content=chunk,
+            task_type="RETRIEVAL_DOCUMENT"
+        )["embedding"]
+        
+        documents.append(chunk)
+        metadatas.append({
+            "document_name": file_name,
+            "document_path": file_name,  # Since it's uploaded, use name
+            "chunk_index": i,
+            "ingested_at": datetime.now().isoformat(),
+            "file_type": "pdf",
+            "chunk_length": len(chunk)
+        })
+        embeddings.append(embedding)
+        ids.append(chunk_id)
+    
+    collection.add(
+        documents=documents,
+        metadatas=metadatas,
+        embeddings=embeddings,
+        ids=ids
+    )
+    return True
 
 # Initialize collections at startup
 law_collection = get_law_collection()
@@ -595,7 +660,8 @@ with tab2:
 with tab3:
     st.title("📄 Police Case Analysis Assistant")
     
-    # Check if documents collection exists and show status
+
+    
     if documents_collection:
         doc_count = documents_collection.count()
         # st.success(f"✅ Connected to case documents database ({doc_count} document chunks available)")
@@ -625,6 +691,52 @@ with tab3:
             with st.chat_message("assistant"):
                 st.markdown(a)
                 # Removed the expander for sources
+        
+                # Sidebar for PDF ingestion
+        st.sidebar.title("Document Upload")
+        st.sidebar.markdown("Upload your case documents here to analyze them. only applicable for Police Case Analysis Assistant")
+        uploaded_pdfs = st.sidebar.file_uploader(
+            "Upload PDF documents:", 
+            type="pdf", 
+            key="sidebar_pdf_upload",
+            accept_multiple_files=True
+        )
+
+        if uploaded_pdfs:
+            if st.sidebar.button("Ingest PDFs"):
+                collection = get_documents_collection()
+                if collection:
+                    success_count = 0
+                    total_files = len(uploaded_pdfs)
+                    
+                    # Create progress containers
+                    progress_bar = st.sidebar.progress(0)
+                    status_text = st.sidebar.empty()
+                    
+                    for i, uploaded_pdf in enumerate(uploaded_pdfs):
+                        # Update progress
+                        progress = (i) / total_files
+                        progress_bar.progress(progress)
+                        status_text.text(f"Ingesting: {uploaded_pdf.name}")
+                        
+                        # Ingest document
+                        success = ingest_document(collection, uploaded_pdf)
+                        if success:
+                            success_count += 1
+                    
+                    # Final progress update
+                    progress_bar.progress(1.0)
+                    status_text.text("Ingestion complete!")
+                    
+                    # Show results
+                    if success_count == total_files:
+                        st.sidebar.success(f"✅ All {total_files} PDFs ingested successfully!")
+                    elif success_count > 0:
+                        st.sidebar.warning(f"⚠️ {success_count}/{total_files} PDFs ingested successfully")
+                    else:
+                        st.sidebar.error("❌ Failed to ingest any PDFs")
+                else:
+                    st.sidebar.error("Could not access database")
         
         # Chat interface
         if question := st.chat_input("Ask about your case documents...", key="doc_chat_input"):
