@@ -1,7 +1,7 @@
 streamlit
 google-generativeai
 chromadb
-pypdf2
+PyMuPDF
 langchain
 python-dotenv
 pandas

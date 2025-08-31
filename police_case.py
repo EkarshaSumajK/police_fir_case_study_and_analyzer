@@ -8,6 +8,10 @@ from datetime import datetime
 import time
 from tqdm import tqdm
 import sys
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Configuration
 CHROMA_PATH = "police_vector_db"

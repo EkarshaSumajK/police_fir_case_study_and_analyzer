@@ -233,17 +233,36 @@ def retrieve_law_sections(query_text, k=5):
     if not law_collection:
         st.error("Law collection not available")
         return []
-    
+
     embedding = _embed_query_text(query_text)
     if embedding is None:
         return []
-        
+
     results = law_collection.query(
         query_embeddings=[embedding],
         n_results=k,
-        include=["metadatas"],
+        include=["metadatas", "documents"],  # Include documents for full text access
     )
-    return results['metadatas'][0] if results and results.get('metadatas') else []
+
+    if not results or not results.get('metadatas'):
+        return []
+
+    # Combine metadata with document content for better FIR analysis
+    law_sections = []
+    for i, metadata in enumerate(results['metadatas'][0]):
+        # Create a comprehensive law section entry
+        law_section = {
+            'section_number': metadata.get('section_number', metadata.get('law_name', 'N/A')),
+            'section_name': metadata.get('section_name', metadata.get('law_name', 'N/A')),
+            'full_text': results['documents'][0][i] if results.get('documents') and i < len(results['documents'][0]) else metadata.get('full_text', ''),
+            'code': metadata.get('code', 'Law'),
+            'filename': metadata.get('filename', ''),
+            'chunk_index': metadata.get('chunk_index', 0),
+            'url': metadata.get('filepath', metadata.get('url', ''))
+        }
+        law_sections.append(law_section)
+
+    return law_sections
 
 @st.cache_data(show_spinner=False)
 def retrieve_case_documents(query_text, k=5):
@@ -273,11 +292,25 @@ def retrieve_case_documents(query_text, k=5):
 # --- FIR Analysis Prompt ---
 def build_fir_system_prompt(fir_summary, relevant_laws, jurisdiction):
     """Constructs the system prompt for analyzing an FIR."""
-    laws_context = "\n".join([f"- Section {law['section_number']} ({law['section_name']}): {law['full_text']}" for law in relevant_laws]) if relevant_laws else "No relevant laws found."
-    
+    # Build laws context with better formatting for PDF chunks
+    laws_context = ""
+    if relevant_laws:
+        for i, law in enumerate(relevant_laws, 1):
+            code = law.get('code', 'Law')
+            section_name = law.get('section_name', 'N/A')
+            filename = law.get('filename', '')
+            chunk_info = f" (Chunk {law.get('chunk_index', 0)})" if law.get('chunk_index') is not None else ""
+
+            laws_context += f"\n{i}. {code} - {section_name}{chunk_info}"
+            if filename:
+                laws_context += f" (from {filename})"
+            laws_context += f":\n{law.get('full_text', '')}\n"
+    else:
+        laws_context = "No relevant laws found."
+
     json_schema = {
         "sections": [{
-            "section": "BNS/CrPC Section Number (e.g., BNS 420 or CrPC 41)",
+            "section": "BNS/CrPC/IPC Section Number (e.g., BNS 420 or CrPC 41 or IPC 41)",
             "rationale_en": "2-3 sentence rationale in English.",
             "rationale_te": "2-3 sentence rationale in Telugu.",
             "reasoning_quote_en": "Verbatim quote from the provided law text.",
@@ -296,9 +329,9 @@ def build_fir_system_prompt(fir_summary, relevant_laws, jurisdiction):
         "actions_te": ["Step 1 in Telugu", "Step 2 in Telugu"]
     }
 
-    prompt = f"""You are an expert AI legal assistant for Indian Police. Analyze the case details and recommend BNS/CrPC sections based ONLY on the provided context. Provide rationale, verbatim quotes, and procedural steps. Your output MUST be a single, valid JSON object conforming EXACTLY to the schema.
+    prompt = f"""You are an expert AI legal assistant for Indian Police. Analyze the case details and recommend BNS/CrPC/IPC sections based ONLY on the provided context. Provide rationale, verbatim quotes, and procedural steps. Your output MUST be a single, valid JSON object conforming EXACTLY to the schema.
 
-Potentially Relevant Law Sections:
+Potentially Relevant Law Sections from PDF Documents:
 {laws_context}
 
 Jurisdiction: {jurisdiction}
@@ -312,6 +345,8 @@ IMPORTANT: Your final output must be a valid JSON object matching this schema:
 ```json
 {json.dumps(json_schema, indent=2)}
 ```
+
+Note: The law sections above are extracted from PDF documents and may contain chunked content. Use the most relevant portions for your analysis.
 """
     return prompt
 
@@ -419,15 +454,39 @@ def render_sources(sources: list, distances: list = None):
             """, unsafe_allow_html=True)
 
 # --- FIR Render Function ---
-def _render_fir_analysis(res: dict):
+def _render_fir_analysis(res: dict, relevant_laws: list = None):
     """Renders the structured JSON output for FIR analysis."""
     if not res: st.info("No analysis available."); return
+    if relevant_laws is None: relevant_laws = []
     st.subheader("✅ Recommended BNS/CrPC Sections")
     if res.get("sections"):
         for sec in res["sections"]:
             law = sec.get("law_citation", {}) or {}
             section_label = sec.get("section", "N/A").replace("IPC", "BNS")
             st.markdown(f"<div class='card'><strong>Section:</strong> <code>{section_label}</code>", unsafe_allow_html=True)
+
+            # Add source information for PDF-based laws
+            if relevant_laws and len(relevant_laws) > 0:
+                # Try to find matching law from retrieved sections
+                matching_law = None
+                for rl in relevant_laws:
+                    if (rl.get('section_name') in section_label or
+                        rl.get('code') in section_label or
+                        str(rl.get('section_number', '')) in section_label):
+                        matching_law = rl
+                        break
+
+                if matching_law:
+                    source_info = []
+                    if matching_law.get('filename'):
+                        source_info.append(f"📄 {matching_law['filename']}")
+                    if matching_law.get('code'):
+                        source_info.append(f"📋 {matching_law['code']}")
+                    if matching_law.get('chunk_index') is not None:
+                        source_info.append(f"📊 Chunk {matching_law['chunk_index']}")
+
+                    if source_info:
+                        st.markdown(f"<small class='small-muted'>Source: {' • '.join(source_info)}</small>", unsafe_allow_html=True)
             
             col_en, col_te = st.columns(2)
             with col_en:
@@ -578,31 +637,36 @@ tab1, tab2, tab3 = st.tabs(["⚖️ FIR Analysis", "📜 Judgment Analysis", "�
 with tab1:
     st.info("Paste FIRs to analyze against BNS/CrPC sections.")
     
-    DEFAULT_SECTIONS = 5
+    DEFAULT_SECTIONS = 10
     
     def process_fir_input(text):
         relevant_laws = retrieve_law_sections(text, k=DEFAULT_SECTIONS)
         system_prompt = build_fir_system_prompt(text, relevant_laws, st.session_state.jurisdiction)
-        return call_gemini_for_fir(system_prompt)
+        analysis_result = call_gemini_for_fir(system_prompt)
+        # Return both analysis result and relevant laws for source tracking
+        return analysis_result, relevant_laws
     
     for msg in st.session_state.fir_messages:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
             if msg["role"] == "assistant" and "analysis_result" in msg:
-                _render_fir_analysis(msg["analysis_result"])
-    
+                # Get relevant laws for source information (if available)
+                relevant_laws = msg.get("relevant_laws", [])
+                _render_fir_analysis(msg["analysis_result"], relevant_laws)
+
     if fir_input := st.chat_input("Enter FIR or case details...", key="fir_input"):
         with st.chat_message("user"):
             st.markdown(fir_input)
         
         st.session_state.fir_messages.append({"role": "user", "content": fir_input})
-        
+
         with st.spinner(f"Analyzing for relevant BNS/CrPC sections..."):
-            analysis_result = process_fir_input(fir_input)
+            analysis_result, relevant_laws = process_fir_input(fir_input)
             st.session_state.fir_messages.append({
                 "role": "assistant",
                 "content": "FIR analysis complete",
-                "analysis_result": analysis_result
+                "analysis_result": analysis_result,
+                "relevant_laws": relevant_laws  # Store for source tracking
             })
         
         st.rerun()
